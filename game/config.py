@@ -59,3 +59,28 @@ TRAVEL_SECONDS = 15.0   # time a TRAVEL hop takes; not instant.
 
 # --- Ephemeral local chat ---
 CHAT_MESSAGE_TTL_SECONDS = 60.0  # chat is never persisted; it just expires.
+
+# --- Combat: health/mana pools -----------------------------------------
+BASE_HP = 50.0
+HP_PER_CON_LEVEL = 5.0
+BASE_MANA = 20.0
+MANA_PER_INT_LEVEL = 4.0
+HP_REGEN_PER_SECOND = BASE_HP / 300.0     # ~5 minutes to heal from empty
+MANA_REGEN_PER_SECOND = BASE_MANA / 180.0  # ~3 minutes to refill from empty
+
+# --- Combat: damage/defense scaling -------------------------------------
+BASE_UNARMED_DAMAGE = 1.0
+STR_DAMAGE_PER_LEVEL = 0.5   # melee (STRENGTH)
+DEX_DAMAGE_PER_LEVEL = 0.5   # ranged (DEXTERITY)
+INT_DAMAGE_PER_LEVEL = 0.6   # magic (INTELLIGENCE)
+DEFENSE_PER_CON_LEVEL = 0.4
+EVASION_PERCENT_PER_LEVEL = 1.5   # dodge chance % per EVASION level
+MAX_EVASION_CHANCE = 0.6
+
+# --- Combat: pacing (diku-style independent attack timers) -------------
+BASE_ATTACK_INTERVAL = 4.0        # seconds between a combatant's own swings
+MIN_ATTACK_INTERVAL = 1.5
+MONSTER_ATTACK_INTERVAL = 3.0
+COMBAT_PULSE_SECONDS = 1.0        # how often the server checks for due swings
+FLEE_BASE_CHANCE = 0.5
+FLEE_CHANCE_PER_EVASION_LEVEL = 0.03

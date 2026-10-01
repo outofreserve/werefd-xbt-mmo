@@ -107,6 +107,10 @@ _MIGRATIONS = [
     ("players", "active_companion_id", "INTEGER"),
     ("players", "travel_destination", "TEXT"),
     ("players", "travel_arrival", "REAL"),
+    ("players", "hp", f"REAL NOT NULL DEFAULT {config.BASE_HP}"),
+    ("players", "mana", f"REAL NOT NULL DEFAULT {config.BASE_MANA}"),
+    ("players", "last_regen_at", "REAL"),  # NULL means "needs lazy init" -- see combat_stats.resolve_regen
+    ("players", "equipped_weapon", "TEXT"),
 ]
 
 
@@ -165,6 +169,10 @@ class Player:
     active_companion_id: int | None = None
     travel_destination: str | None = None
     travel_arrival: float | None = None
+    hp: float | None = None
+    mana: float | None = None
+    last_regen_at: float | None = None
+    equipped_weapon: str | None = None
 
 
 def create_player(username: str, password: str) -> Player:
@@ -178,15 +186,20 @@ def create_player(username: str, password: str) -> Player:
         if existing:
             raise ValueError("username already taken")
         conn.execute(
-            """INSERT INTO players (username, salt, password_hash, fiat, xbt, hash_power_ghs, created_at)
-               VALUES (?, ?, ?, ?, 0, 0, ?)""",
-            (username, salt, pw_hash, config.STARTING_FIAT, now),
+            """INSERT INTO players
+                   (username, salt, password_hash, fiat, xbt, hash_power_ghs, created_at,
+                    hp, mana, last_regen_at)
+               VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (username, salt, pw_hash, config.STARTING_FIAT, now, config.BASE_HP, config.BASE_MANA, now),
         )
         conn.execute(
             """UPDATE game_state SET total_fiat_supply = total_fiat_supply + ?""",
             (config.STARTING_FIAT,),
         )
-    return Player(username, config.STARTING_FIAT, 0.0, 0.0, now)
+    return Player(
+        username, config.STARTING_FIAT, 0.0, 0.0, now,
+        hp=config.BASE_HP, mana=config.BASE_MANA, last_regen_at=now,
+    )
 
 
 def authenticate(username: str, password: str) -> bool:
@@ -203,7 +216,7 @@ def get_player(username: str) -> Player | None:
     with connect() as conn:
         row = conn.execute(
             """SELECT username, fiat, xbt, hash_power_ghs, created_at, location, active_companion_id,
-                      travel_destination, travel_arrival
+                      travel_destination, travel_arrival, hp, mana, last_regen_at, equipped_weapon
                FROM players WHERE username = ?""",
             (username,),
         ).fetchone()
@@ -213,6 +226,28 @@ def get_player(username: str) -> Player | None:
             row["username"], row["fiat"], row["xbt"], row["hash_power_ghs"], row["created_at"],
             row["location"], row["active_companion_id"],
             row["travel_destination"], row["travel_arrival"],
+            row["hp"], row["mana"], row["last_regen_at"], row["equipped_weapon"],
+        )
+
+
+def set_hp_mana(username: str, hp: float, mana: float, now: float, conn=None):
+    def _run(c):
+        c.execute(
+            "UPDATE players SET hp = ?, mana = ?, last_regen_at = ? WHERE username = ?",
+            (hp, mana, now, username),
+        )
+
+    if conn is not None:
+        _run(conn)
+    else:
+        with connect() as c:
+            _run(c)
+
+
+def set_equipped_weapon(username: str, item_id: str | None):
+    with connect() as conn:
+        conn.execute(
+            "UPDATE players SET equipped_weapon = ? WHERE username = ?", (item_id, username)
         )
 
 

@@ -12,8 +12,17 @@ from dataclasses import dataclass
 class Item:
     id: str
     name: str
-    category: str   # "raw_fish" | "food" | "ore" | "junk" | "misc"
+    category: str   # "raw_fish" | "food" | "ore" | "junk" | "misc" | "weapon"
     sell_value: float = 0.0  # fiat value if sold to the generic market, 0 = unsellable
+    # --- Equipment fields (only meaningful when slot is set) ---
+    slot: str | None = None             # "weapon" (more slots can be added later)
+    damage_type: str | None = None      # "melee" | "ranged" | "magic"
+    str_bonus: float = 0.0
+    dex_bonus: float = 0.0
+    con_bonus: float = 0.0
+    eva_bonus: float = 0.0
+    int_bonus: float = 0.0
+    attack_speed_bonus: float = 0.0     # seconds shaved off the base attack interval
 
 
 ITEMS: dict[str, Item] = {
@@ -29,6 +38,19 @@ ITEMS: dict[str, Item] = {
     "tin_ore": Item("tin_ore", "Tin Ore", "ore", sell_value=2.0),
     "iron_ore": Item("iron_ore", "Iron Ore", "ore", sell_value=6.0),
     "gold_ore": Item("gold_ore", "Gold Ore", "ore", sell_value=25.0),
+    # Weapons (Journey to Town quest reward choice)
+    "magic_staff": Item(
+        "magic_staff", "Magic Staff", "weapon", sell_value=0.0,
+        slot="weapon", damage_type="magic", int_bonus=1.0,
+    ),
+    "wooden_bow": Item(
+        "wooden_bow", "Wooden Bow", "weapon", sell_value=0.0,
+        slot="weapon", damage_type="ranged", dex_bonus=0.5, attack_speed_bonus=0.5,
+    ),
+    "bronze_sword": Item(
+        "bronze_sword", "Bronze Sword", "weapon", sell_value=0.0,
+        slot="weapon", damage_type="melee", str_bonus=1.0,
+    ),
 }
 
 

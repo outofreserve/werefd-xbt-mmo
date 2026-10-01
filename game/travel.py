@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 
 from game import config, db, world
+from game import battle
 
 
 def is_travelling(player, now: float | None = None) -> tuple[bool, float]:
@@ -35,6 +36,8 @@ def resolve_arrival(username: str, now: float | None = None) -> str:
 
 def travel(username: str, direction: str, now: float | None = None) -> tuple[bool, str]:
     now = now if now is not None else time.time()
+    if battle.in_combat(username):
+        return False, "You're in combat! Type FLEE to disengage first."
     resolve_arrival(username, now)
     player = db.get_player(username)
 

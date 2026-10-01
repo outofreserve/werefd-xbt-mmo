@@ -6,7 +6,7 @@ renders it correctly.
 """
 from __future__ import annotations
 
-from game import chat, combat, companions, db, items, mapview, quests, travel, world
+from game import battle, chat, combat_stats, companions, db, items, mapview, quests, travel, world
 from game.skills.base import SKILLS, level_for_xp, xp_to_next_level
 
 CLEAR = "\x1b[2J\x1b[H"
@@ -16,6 +16,7 @@ RESET = "\x1b[0m"
 CYAN = "\x1b[36m"
 YELLOW = "\x1b[33m"
 GREEN = "\x1b[32m"
+RED = "\x1b[31m"
 
 
 def _bar(fraction: float, width: int = 20) -> str:
@@ -73,6 +74,7 @@ def dashboard(
     loc = world.get(player.location)
     xp_map = db.get_all_xp(username)
     active_quests = [q for q, status in quests.list_for_player(username) if status == "active"]
+    awaiting_choice = [q for q, status in quests.list_for_player(username) if status == "awaiting_choice"]
     companion_line = "none"
     if player.active_companion_id:
         comp = db.get_companion(player.active_companion_id)
@@ -89,12 +91,34 @@ def dashboard(
     import time as _time
     now = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
 
+    con_level = level_for_xp(xp_map.get("CONSTITUTION", 0.0))
+    int_level = level_for_xp(xp_map.get("INTELLIGENCE", 0.0))
+    in_combat = battle.in_combat(username)
+    combat_resolved = combat_stats.resolve_regen(username)
+    if in_combat:
+        bt = battle.get_battle(username)
+        me = bt.a if bt.a.key == username else bt.b
+        foe = bt.b if bt.a.key == username else bt.a
+        hp_now = me.hp
+    else:
+        hp_now = combat_resolved.hp
+    max_hp_now = combat_stats.max_hp(con_level)
+    max_mana_now = combat_stats.max_mana(int_level)
+    mana_now = combat_resolved.mana if combat_resolved.mana is not None else max_mana_now
+    weapon = combat_stats.get_equipped_weapon(player)
+    weapon_line = weapon.name if weapon else "none (bare-handed)"
+
     where = f"On the road to {world.get(player.travel_destination).name} (ETA {remaining:.0f}s)" if travelling else loc.name
+    if in_combat:
+        where = f"{RED}IN COMBAT vs {foe.name}{RESET}"
     header = (
         f"{BOLD}{CYAN}WE'RE F'D: AN XBT MMO // DASHBOARD{RESET}"
         f"{' ' * 10}{DIM}{now}{RESET}\n"
         f"{BOLD}{username}{RESET} | {where} | Hash: {player.hash_power_ghs:g} GH/s"
-        f" | Companion: {companion_line}"
+        f" | Companion: {companion_line}\n"
+        f"HP {_bar(hp_now / max_hp_now if max_hp_now else 0)} {hp_now:.0f}/{max_hp_now:.0f}"
+        f"  MP {_bar(mana_now / max_mana_now if max_mana_now else 0)} {mana_now:.0f}/{max_mana_now:.0f}"
+        f"  Weapon: {weapon_line}"
     )
 
     # --- Left column: resources, skills, quests -----------------------
@@ -115,6 +139,10 @@ def dashboard(
             left.append(f" {q.name}")
     else:
         left.append(" (none)")
+    if awaiting_choice:
+        for q in awaiting_choice:
+            options = " | ".join(f"CHOOSE {opt}" for opt in q.reward_choice)
+            left.append(f" {YELLOW}{q.name}: {options}{RESET}")
 
     # --- Center column: location view ----------------------------------
     if travelling:
@@ -159,6 +187,7 @@ def dashboard(
     right.append(f"{YELLOW}COMBAT{RESET}")
     right.append(" PVE <monster>")
     right.append(" DUEL CHALLENGE <user>")
+    right.append(" FLEE  EQUIP <item>")
     right.append(f"{YELLOW}SYSTEM{RESET}")
     right.append(" HELP  QUIT")
 
@@ -208,19 +237,28 @@ def skills_screen(username: str) -> str:
 
 def inventory_screen(username: str) -> str:
     inv = db.get_inventory(username)
+    player = db.get_player(username)
     lines = [CLEAR, _rule("Inventory"), ""]
     if not inv:
         lines.append("  (empty)")
     for item_id, qty in sorted(inv.items()):
-        lines.append(f"  {qty:>4}x {items.name_of(item_id)}")
+        equipped = " (equipped)" if item_id == player.equipped_weapon else ""
+        lines.append(f"  {qty:>4}x {items.name_of(item_id)}{equipped}")
     return "\n".join(lines)
 
 
 def quests_screen(username: str) -> str:
     lines = [CLEAR, _rule("Quests"), ""]
     for quest, status in quests.list_for_player(username):
-        tag = {"active": YELLOW + "[active]", "complete": GREEN + "[complete]"}.get(status, DIM + "[" + status + "]")
+        tag = {
+            "active": YELLOW + "[active]",
+            "complete": GREEN + "[complete]",
+            "awaiting_choice": YELLOW + "[choose reward]",
+        }.get(status, DIM + "[" + status + "]")
         lines.append(f"  {tag}{RESET} {quest.name} -- {quest.description}")
+        if status == "awaiting_choice" and quest.reward_choice:
+            options = " | ".join(f"CHOOSE {opt}" for opt in quest.reward_choice)
+            lines.append(f"    {options}")
     return "\n".join(lines)
 
 

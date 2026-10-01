@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from game import chat, combat, companions, config, db, economy, quests, training, travel, ui, world
+from game import battle, chat, combat, companions, config, db, economy, equipment, quests, training, travel, ui, world
 import game.skills  # noqa: F401  (import registers FISHING/MINING/COOKING)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -60,12 +60,16 @@ HELP_TEXT = """\
   BUY COMPANION <species>   Buy a companion with XBT (shop species only)
 
 -- Combat --
-  PVE <monster>             Fight a wild monster at your location
+  PVE <monster>             Engage a wild monster -- auto-attack starts, rounds push live
   DUEL CHALLENGE <user>     Challenge another player to a staked duel
   DUEL STAKE FIAT <amount> | XBT <amount> | ITEM <id> <qty> | COMPANION <id>
-  DUEL ACCEPT               Accept your pending duel (resolves it instantly)
+  DUEL ACCEPT               Accept your pending duel -- auto-attack begins
   DUEL CANCEL               Cancel your pending duel
   DUEL STATUS               Show your pending duel
+  FLEE                      Attempt to disengage from your current fight
+  EQUIP <item>              Equip a weapon from your inventory
+  UNEQUIP                   Unequip your current weapon
+  CHOOSE <option>           Pick an awaiting quest reward, e.g. CHOOSE SWORD
 
   QUIT                      Disconnect
 """ % (
@@ -179,6 +183,14 @@ class Session:
             await self.cmd_pve(parts[1])
         elif verb == "DUEL":
             await self.cmd_duel(parts)
+        elif verb == "FLEE":
+            await self.cmd_flee()
+        elif verb == "EQUIP" and len(parts) == 2:
+            await self.cmd_equip(parts[1])
+        elif verb == "UNEQUIP":
+            await self.cmd_unequip()
+        elif verb == "CHOOSE" and len(parts) == 2:
+            await self.cmd_choose(parts[1])
         elif verb == "FIGHT" and len(parts) >= 2:
             await self.cmd_action(parts[1])
         elif verb == "QUEST":
@@ -321,8 +333,32 @@ class Session:
 
     async def cmd_pve(self, monster_id: str):
         async with GAME_LOCK:
-            ok, msg = await asyncio.to_thread(combat.pve_fight, self.username, monster_id)
+            ok, msg = await asyncio.to_thread(battle.start_pve, self.username, monster_id)
         await self.send(("OK\n" if ok else "ERR ") + msg)
+
+    async def cmd_flee(self):
+        async with GAME_LOCK:
+            ok, msg, pushes = await asyncio.to_thread(battle.flee, self.username)
+            for target_user, push_msg in pushes:
+                sess = SESSIONS.get(target_user)
+                if sess is not None:
+                    await sess.send("OK " + push_msg)
+        await self.send(("OK " if ok else "ERR ") + msg)
+
+    async def cmd_equip(self, item_id: str):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(equipment.equip, self.username, item_id)
+        await self.send(("OK " if ok else "ERR ") + msg)
+
+    async def cmd_unequip(self):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(equipment.unequip, self.username)
+        await self.send(("OK " if ok else "ERR ") + msg)
+
+    async def cmd_choose(self, option: str):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(quests.choose_reward, self.username, option)
+        await self.send(("OK " if ok else "ERR ") + msg)
 
     async def cmd_duel(self, parts: list[str]):
         if len(parts) < 2:
@@ -378,6 +414,10 @@ class Session:
         if sub == "ACCEPT":
             async with GAME_LOCK:
                 ok, msg = await asyncio.to_thread(combat.accept, duel["id"], self.username)
+            if ok:
+                challenger_sess = SESSIONS.get(duel["challenger"])
+                if challenger_sess is not None and challenger_sess is not self:
+                    await challenger_sess.send("OK\n" + msg)
             await self.send(("OK\n" if ok else "ERR ") + msg)
             return
 
@@ -423,6 +463,25 @@ async def dashboard_refresh_loop():
                 log.exception("error auto-refreshing dashboard for %s", sess.username)
 
 
+async def combat_round_loop():
+    """Advances every active real-time battle each pulse and pushes any new
+    round lines straight to the fighters' terminals, independent of
+    whatever command they're otherwise typing -- the diku-style auto-attack
+    engine runs on its own clock."""
+    while True:
+        await asyncio.sleep(config.COMBAT_PULSE_SECONDS)
+        async with GAME_LOCK:
+            pushes = await asyncio.to_thread(battle.process_tick)
+        for username, msg in pushes:
+            sess = SESSIONS.get(username)
+            if sess is not None:
+                try:
+                    await sess.send("OK " + msg)
+                except Exception:
+                    log.exception("error pushing combat update to %s", username)
+
+
+
 async def handle_client(reader, writer):
     await Session(reader, writer).handle()
 
@@ -431,6 +490,7 @@ async def main():
     await asyncio.to_thread(db.init_db)
     asyncio.create_task(tick_loop())
     asyncio.create_task(dashboard_refresh_loop())
+    asyncio.create_task(combat_round_loop())
     server = await asyncio.start_server(handle_client, config.HOST, config.PORT)
     addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     log.info("serving on %s", addrs)

@@ -5,12 +5,15 @@ import random
 import time
 
 from game import db, items, resource_nodes, travel
+from game import battle
 from game.skills import base as skills_base
 from game.skills.base import SKILLS
 
 
 def train(username: str, skill_id: str, action_id: str, now: float | None = None) -> tuple[bool, str]:
     now = now if now is not None else time.time()
+    if battle.in_combat(username):
+        return False, "You're in combat! Type FLEE to disengage first."
     travel.resolve_arrival(username, now)
     player = db.get_player(username)
 

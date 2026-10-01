@@ -13,6 +13,8 @@ class Monster:
     defense: int
     fiat_reward: float
     recruit_species: str | None = None  # species id players may tame on victory
+    attack_interval: float = 3.0        # seconds between the monster's own swings
+    damage_type: str = "melee"          # flavor text only for now
 
 
 MONSTERS: dict[str, Monster] = {

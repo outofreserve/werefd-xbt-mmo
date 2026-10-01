@@ -39,15 +39,18 @@ python3 client.py 127.0.0.1 6565
 | `SAY <message>` | Chat to players in your current location (fades after ~60s, never saved) |
 | `BUY COMPANION <species>` | Buy a companion with XBT (shop species only) |
 | `SET COMPANION <id>` | Make an owned companion your active combatant |
-| `PVE <monster>` | Fight a wild monster at your location |
+| `PVE <monster>` | Engage a wild monster at your location in real-time auto-attack combat |
 | `DUEL CHALLENGE <user>` | Challenge another player to a staked duel |
 | `DUEL STAKE FIAT\|XBT\|ITEM\|COMPANION ...` | Set your stake for the pending duel |
 | `DUEL ACCEPT` / `DUEL CANCEL` / `DUEL STATUS` | Resolve, cancel, or inspect your pending duel |
+| `FLEE` | Attempt to disengage from your current fight (chance-based, scales with Evasion) |
+| `EQUIP <item>` / `UNEQUIP` | Wield/remove a weapon from your inventory |
 | `MARKET PRICE` | Current XBT/fiat exchange price |
 | `MARKET BUY <fiat>` | Spend fiat to buy XBT on the AMM |
 | `MARKET SELL <xbt>` | Sell XBT for fiat on the AMM |
 | `FIGHT GOBLIN` / `FIGHT DRAGON` | Risk a fiat stake for a shot at a pool payout |
 | `QUEST` | Free, guaranteed small payout (on cooldown) |
+| `CHOOSE <option>` | Pick a quest's reward when it's awaiting your choice (e.g. `CHOOSE SWORD`) |
 | `HELP` | List commands |
 | `QUIT` | Disconnect |
 
@@ -125,19 +128,38 @@ recipe:** create `game/skills/<name>.py` defining a `Skill` + its
 command all work automatically off the registry -- no other code changes.
 
 ### Companions & combat
-Companions (`game/companions.py`) are simple stat blocks (HP/attack/
-defense) acquired by defeating wild monsters (`PVE <monster>`, chance to
-tame), as quest rewards, or purchased with XBT (`BUY COMPANION
-<species>`). `SET COMPANION <id>` makes one active; combat uses your
-active companion's stats (or weak bare-handed stats if you have none).
-Combat itself (`game/combat.py`) is simple turn-based stat exchange for
-v1, with room to layer ability cards on top later without changing the
-player-facing commands.
+Companions (`game/companions.py`) are simple stat blocks (attack/defense)
+acquired by defeating wild monsters (`PVE <monster>`, chance to tame), as
+quest rewards, or purchased with XBT (`BUY COMPANION <species>`). `SET
+COMPANION <id>` makes one active, adding its attack/defense to your own.
+
+**Combat attributes are skills too.** Strength, Dexterity, Constitution,
+Evasion, and Intelligence (`game/skills/attributes.py`) level up from
+fighting just like Fishing or Mining levels up from gathering -- they
+drive melee/ranged/magic damage, your HP/mana pool size, and dodge
+chance. HP and mana regen passively over time and are shown live on the
+`DASHBOARD` as bars.
+
+**Combat is real-time and diku-style** (`game/battle.py`): `PVE <monster>`
+or `DUEL ACCEPT` starts a fight, and from then on both sides swing
+automatically on their own attack-speed timer -- no turn-taking, no
+per-round commands needed. Rounds resolve server-side every pulse and are
+pushed straight to your terminal as they happen, until one side's HP
+hits zero or someone successfully `FLEE`s (chance scales with Evasion;
+failing gives the opponent a free swing). Other commands (training,
+travelling, equipping) are blocked while you're in combat.
+
+**Equipment** (`EQUIP <item>` / `UNEQUIP`) lets you wield a weapon from
+your inventory; each weapon has a damage type (melee/ranged/magic) and
+attribute bonuses (see `game/items.py`) that feed directly into your
+combat profile. Unarmed, everyone fights weak melee with their bare
+Strength -- getting a weapon (e.g. from a quest reward) is a real power
+spike.
 
 PvP is **mutual, staked duels only** -- no unsolicited ganking:
 `DUEL CHALLENGE <user>`, then both sides `DUEL STAKE FIAT|XBT|ITEM|
-COMPANION ...`, and the challenged player `DUEL ACCEPT` to resolve it
-instantly; the winner takes the loser's stake.
+COMPANION ...`, and the challenged player `DUEL ACCEPT` to kick off the
+real-time fight; the winner takes the loser's stake.
 
 ### Quests
 Declarative in `game/quests.py`: an id, a `check(username)` predicate
@@ -146,6 +168,12 @@ companion). The tutorial quest ("Journey to Town") auto-starts on
 registration and completes the moment you arrive. New quests are just new
 entries -- the engine re-checks all of a player's active quests after
 every command.
+
+Quests can also offer a **choice of item reward** (`reward_choice`): fiat
+and companion rewards are granted immediately, but the quest parks in an
+"awaiting_choice" state until you run `CHOOSE <option>`. "Journey to
+Town" offers a magic staff, wooden bow, or bronze sword -- whichever you
+pick is automatically equipped.
 
 ### Dashboard
 `DASHBOARD`, `SKILLS`, `INVENTORY`, `QUESTS`, `COMPANIONS`, and `MAP` are
@@ -171,8 +199,13 @@ game/chat.py             Ephemeral, in-memory location-scoped chat (never persis
 game/mapview.py          ASCII overworld map renderer
 game/companions.py     Companion species catalog
 game/monsters.py       Wild monster catalog
-game/combat.py          PvE fights + staked PvP duels
-game/quests.py          Quest framework & definitions
+game/skills/attributes.py  STR/DEX/CON/EVASION/INT combat-attribute skills
+game/combat_stats.py    HP/mana regen + combat profile derivation (attributes+weapon+companion)
+game/stakes.py          Duel stake validation/transfer helpers
+game/battle.py          Real-time diku-style auto-attack combat engine (PvE/PvP/flee)
+game/combat.py          Duel admin (challenge/stake/accept/cancel) + buy_companion
+game/equipment.py       EQUIP/UNEQUIP weapon commands
+game/quests.py          Quest framework & definitions (incl. reward-choice quests)
 game/ui.py              ANSI dashboard screens
 tests/                 Unit tests (economy, skills, world, quests, combat, duels)
 ```

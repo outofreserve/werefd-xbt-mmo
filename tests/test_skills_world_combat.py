@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from game import combat, companions, config, db, items, quests, training, travel, world
+from game import battle, combat, combat_stats, companions, config, db, equipment, items, quests, training, travel, world
 import game.skills  # noqa: F401
 from game.skills.base import level_for_xp, xp_for_level, success_chance, SKILLS
 
@@ -117,11 +117,14 @@ class WorldSkillsIntegrationTestCase(unittest.TestCase):
         travel.travel("tester", "east")  # camp -> riverside -> town
         messages = quests.check_and_complete("tester")
         self.assertTrue(any("Journey to Town" in m for m in messages))
-        self.assertEqual(db.get_quest_status("tester", "journey_to_town"), "complete")
+        self.assertEqual(db.get_quest_status("tester", "journey_to_town"), "awaiting_choice")
         player = db.get_player("tester")
         self.assertGreater(player.fiat, config.STARTING_FIAT)  # reward fiat granted
         comps = db.get_companions("tester")
         self.assertTrue(any(c["species_id"] == "pebble" for c in comps))
+        ok, _ = quests.choose_reward("tester", "sword")
+        self.assertTrue(ok)
+        self.assertEqual(db.get_quest_status("tester", "journey_to_town"), "complete")
 
     def test_quest_does_not_complete_twice(self):
         travel.travel("tester", "east")
@@ -144,32 +147,82 @@ class CombatTestCase(unittest.TestCase):
 
     def tearDown(self):
         config.DB_PATH = self._orig_db_path
+        battle.ACTIVE_BATTLES.clear()
 
-    def test_battle_is_deterministic_with_seeded_rng(self):
-        import random
-        a = {"name": "A", "hp": 100, "attack": 10, "defense": 0}
-        b = {"name": "B", "hp": 10, "attack": 1, "defense": 9}
-        result = combat.battle(a, b, rng=random.Random(42))
-        self.assertEqual(result["winner"], "a")
-
-    def test_bare_handed_stats_are_weak_without_companion(self):
-        stats = combat.get_combat_stats("hero")
-        self.assertEqual(stats["hp"], 10)
+    def test_bare_handed_profile_is_weak_without_weapon(self):
+        profile = combat_stats.player_combat_profile("hero")
+        self.assertEqual(profile.damage_type, "melee")
+        self.assertAlmostEqual(profile.power, config.BASE_UNARMED_DAMAGE + config.STR_DAMAGE_PER_LEVEL)
 
     def test_pve_requires_correct_location(self):
-        ok, msg = combat.pve_fight("hero", "boar")  # hero starts at camp, which has boar -- should work
+        ok, msg = battle.start_pve("hero", "boar")  # hero starts at camp, which has boar
         self.assertTrue(ok)
+        self.assertTrue(battle.in_combat("hero"))
 
     def test_pve_unknown_monster(self):
-        ok, msg = combat.pve_fight("hero", "dragon_lord")
+        ok, msg = battle.start_pve("hero", "dragon_lord")
         self.assertFalse(ok)
         self.assertIn("Unknown monster", msg)
 
-    def test_pve_cooldown_enforced(self):
-        combat.pve_fight("hero", "boar")
-        ok, msg = combat.pve_fight("hero", "boar")
+    def test_cannot_start_second_pve_while_in_combat(self):
+        battle.start_pve("hero", "boar")
+        ok, msg = battle.start_pve("hero", "boar")
+        self.assertFalse(ok)
+        self.assertIn("already in combat", msg)
+
+    def test_pve_cooldown_enforced_after_battle_ends(self):
+        now = 1000.0
+        battle.start_pve("hero", "boar", now=now)
+        bt = battle.get_battle("hero")
+        bt.b.hp = 0.1  # force the next swing to finish the fight
+        battle.process_tick(now=now + bt.a.attack_interval + 1)
+        self.assertFalse(battle.in_combat("hero"))
+        ok, msg = battle.start_pve("hero", "boar", now=now + bt.a.attack_interval + 2)
         self.assertFalse(ok)
         self.assertIn("recovering", msg)
+
+    def test_pve_victory_pays_fiat_and_resolves_battle(self):
+        now = 1000.0
+        with db.connect() as conn:
+            conn.execute("UPDATE game_state SET pool_fiat = 1000 WHERE id = 1")
+        battle.start_pve("hero", "boar", now=now)
+        bt = battle.get_battle("hero")
+        bt.b.hp = 0.1
+        fiat_before = db.get_player("hero").fiat
+        battle.process_tick(now=now + bt.a.attack_interval + 1)
+        self.assertFalse(battle.in_combat("hero"))
+        self.assertGreater(db.get_player("hero").fiat, fiat_before)
+
+    def test_attack_grants_attribute_xp(self):
+        now = 1000.0
+        battle.start_pve("hero", "boar", now=now)
+        self.assertGreater(db.get_xp("hero", "STRENGTH"), 0)
+
+    def test_flee_success_ends_combat(self):
+        import random
+        now = 1000.0
+        battle.start_pve("hero", "boar", now=now)
+        orig = random.random
+        random.random = lambda: 0.0  # guarantees the flee roll succeeds
+        try:
+            ok, msg, pushes = battle.flee("hero", now=now + 1)
+        finally:
+            random.random = orig
+        self.assertTrue(ok)
+        self.assertFalse(battle.in_combat("hero"))
+
+    def test_flee_failure_keeps_combat_active(self):
+        import random
+        now = 1000.0
+        battle.start_pve("hero", "boar", now=now)
+        orig = random.random
+        random.random = lambda: 0.999  # guarantees the flee roll fails
+        try:
+            ok, msg, pushes = battle.flee("hero", now=now + 1)
+        finally:
+            random.random = orig
+        self.assertFalse(ok)
+        self.assertTrue(battle.in_combat("hero"))
 
     def test_duel_challenge_and_fiat_stake_transfer(self):
         ok, msg = combat.challenge("hero", "villain")
@@ -182,15 +235,23 @@ class CombatTestCase(unittest.TestCase):
 
         hero_before = db.get_player("hero").fiat
         villain_before = db.get_player("villain").fiat
-        ok, msg = combat.accept(duel["id"], "villain")
+        now = 2000.0
+        ok, msg = combat.accept(duel["id"], "villain", now=now)
         self.assertTrue(ok)
+        self.assertTrue(battle.in_combat("hero"))
+        self.assertTrue(battle.in_combat("villain"))
+
+        bt = battle.get_battle("hero")
+        bt.b.hp = 0.1  # force a winner on the next swing
+        battle.process_tick(now=now + bt.a.attack_interval + 1)
+        self.assertFalse(battle.in_combat("hero"))
+        self.assertFalse(battle.in_combat("villain"))
 
         hero_after = db.get_player("hero").fiat
         villain_after = db.get_player("villain").fiat
         total_before = hero_before + villain_before
         total_after = hero_after + villain_after
         self.assertAlmostEqual(total_before, total_after, places=6)
-        # Exactly one of them should have lost their stake to the other.
         resolved = db.get_duel(duel["id"])
         self.assertEqual(resolved["status"], "resolved")
         self.assertIn(resolved["winner"], ("hero", "villain"))
@@ -216,6 +277,83 @@ class CombatTestCase(unittest.TestCase):
         ok, msg = combat.accept(duel["id"], "villain")
         self.assertFalse(ok)
         self.assertIn("cancelled", msg.lower())
+
+
+class EquipmentTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_db_path = config.DB_PATH
+        config.DB_PATH = os.path.join(self.tmpdir, "test.db")
+        db.init_db()
+        db.create_player("hero", "password")
+
+    def tearDown(self):
+        config.DB_PATH = self._orig_db_path
+        battle.ACTIVE_BATTLES.clear()
+
+    def test_cannot_equip_item_not_owned(self):
+        ok, msg = equipment.equip("hero", "bronze_sword")
+        self.assertFalse(ok)
+
+    def test_equip_applies_weapon_bonus(self):
+        db.add_item("hero", "bronze_sword", 1)
+        ok, msg = equipment.equip("hero", "bronze_sword")
+        self.assertTrue(ok)
+        profile = combat_stats.player_combat_profile("hero")
+        self.assertEqual(profile.damage_type, "melee")
+        self.assertAlmostEqual(
+            profile.power, config.BASE_UNARMED_DAMAGE + (1 + 1.0) * config.STR_DAMAGE_PER_LEVEL
+        )
+
+    def test_selling_equipped_weapon_drops_bonus(self):
+        db.add_item("hero", "wooden_bow", 1)
+        equipment.equip("hero", "wooden_bow")
+        self.assertEqual(combat_stats.player_combat_profile("hero").damage_type, "ranged")
+        db.remove_item("hero", "wooden_bow", 1)
+        self.assertEqual(combat_stats.player_combat_profile("hero").damage_type, "melee")
+
+    def test_cannot_equip_mid_combat(self):
+        db.add_item("hero", "bronze_sword", 1)
+        battle.start_pve("hero", "boar")
+        ok, msg = equipment.equip("hero", "bronze_sword")
+        self.assertFalse(ok)
+
+
+class QuestChoiceTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_db_path = config.DB_PATH
+        self._orig_travel_seconds = config.TRAVEL_SECONDS
+        config.DB_PATH = os.path.join(self.tmpdir, "test.db")
+        config.TRAVEL_SECONDS = 0
+        db.init_db()
+        db.create_player("tester", "password")
+        quests.start_default_quests("tester")
+        travel.travel("tester", "east")
+        travel.travel("tester", "east")  # camp -> riverside -> town
+
+    def tearDown(self):
+        config.DB_PATH = self._orig_db_path
+        config.TRAVEL_SECONDS = self._orig_travel_seconds
+
+    def test_quest_completion_awaits_weapon_choice(self):
+        messages = quests.check_and_complete("tester")
+        self.assertTrue(any("Journey to Town" in m for m in messages))
+        self.assertEqual(db.get_quest_status("tester", "journey_to_town"), "awaiting_choice")
+        self.assertEqual(db.get_item_qty("tester", "bronze_sword"), 0)
+
+    def test_choosing_grants_and_equips_weapon(self):
+        quests.check_and_complete("tester")
+        ok, msg = quests.choose_reward("tester", "sword")
+        self.assertTrue(ok)
+        self.assertEqual(db.get_quest_status("tester", "journey_to_town"), "complete")
+        self.assertEqual(db.get_item_qty("tester", "bronze_sword"), 1)
+        self.assertEqual(db.get_player("tester").equipped_weapon, "bronze_sword")
+
+    def test_invalid_choice_rejected(self):
+        quests.check_and_complete("tester")
+        ok, msg = quests.choose_reward("tester", "shield")
+        self.assertFalse(ok)
 
 
 class DelayedTravelTestCase(unittest.TestCase):
@@ -262,7 +400,7 @@ class DelayedTravelTestCase(unittest.TestCase):
     def test_pve_blocked_while_travelling(self):
         now = 1000.0
         travel.travel("wanderer", "east", now=now)
-        ok, msg = combat.pve_fight("wanderer", "boar", now=now + 1)
+        ok, msg = battle.start_pve("wanderer", "boar", now=now + 1)
         self.assertFalse(ok)
         self.assertIn("on the road", msg)
 
