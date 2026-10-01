@@ -15,7 +15,13 @@ MINING = Skill(
         ),
         "iron": SkillAction(
             id="iron", name="Mine iron ore", level_req=15, xp=35.0,
-            cooldown=7, produces="iron_ore", base_success=1.0,
+            cooldown=2, produces="iron_ore", base_success=1.0,
+            node_type="iron_vein",
+        ),
+        "gold": SkillAction(
+            id="gold", name="Mine gold ore", level_req=30, xp=65.0,
+            cooldown=2, produces="gold_ore", base_success=1.0,
+            node_type="gold_vein",
         ),
     },
 )

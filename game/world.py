@@ -16,6 +16,12 @@ class Location:
     exits: dict[str, str]          # direction/command -> location id
     skills: list[str] = field(default_factory=list)   # skill ids trainable here
     monsters: list[str] = field(default_factory=list)  # monster ids found here
+    # Overworld map metadata -- purely cosmetic, used by game/mapview.py.
+    # coords: (col, row) on the shared map grid; row increases downward (north = up).
+    coords: tuple[int, int] = (0, 0)
+    glyph: str = "?"            # single-char landmark marker
+    color: str = "\x1b[37m"     # ANSI color for the glyph
+    biome: str = "forest"       # drives terrain fill + overlay around this location
 
 
 LOCATIONS: dict[str, Location] = {
@@ -28,6 +34,10 @@ LOCATIONS: dict[str, Location] = {
         ),
         exits={"east": "riverside"},
         monsters=["boar"],
+        coords=(6, 7),
+        glyph="C",
+        color="\x1b[33m",
+        biome="forest",
     ),
     "riverside": Location(
         id="riverside",
@@ -38,6 +48,10 @@ LOCATIONS: dict[str, Location] = {
         ),
         exits={"west": "camp", "east": "town"},
         skills=["FISHING"],
+        coords=(26, 7),
+        glyph="R",
+        color="\x1b[36m",
+        biome="river",
     ),
     "town": Location(
         id="town",
@@ -49,6 +63,10 @@ LOCATIONS: dict[str, Location] = {
         ),
         exits={"west": "riverside", "north": "quarry"},
         skills=["COOKING"],
+        coords=(46, 7),
+        glyph="T",
+        color="\x1b[35;1m",
+        biome="town",
     ),
     "quarry": Location(
         id="quarry",
@@ -59,6 +77,10 @@ LOCATIONS: dict[str, Location] = {
         ),
         exits={"south": "town"},
         skills=["MINING"],
+        coords=(46, 2),
+        glyph="Q",
+        color="\x1b[37;1m",
+        biome="mountain",
     ),
 }
 

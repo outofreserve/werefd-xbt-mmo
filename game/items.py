@@ -28,6 +28,7 @@ ITEMS: dict[str, Item] = {
     "copper_ore": Item("copper_ore", "Copper Ore", "ore", sell_value=2.0),
     "tin_ore": Item("tin_ore", "Tin Ore", "ore", sell_value=2.0),
     "iron_ore": Item("iron_ore", "Iron Ore", "ore", sell_value=6.0),
+    "gold_ore": Item("gold_ore", "Gold Ore", "ore", sell_value=25.0),
 }
 
 

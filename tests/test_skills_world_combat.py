@@ -42,13 +42,16 @@ class WorldSkillsIntegrationTestCase(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self._orig_db_path = config.DB_PATH
+        self._orig_travel_seconds = config.TRAVEL_SECONDS
         config.DB_PATH = os.path.join(self.tmpdir, "test.db")
+        config.TRAVEL_SECONDS = 0  # instant for most tests; delay is covered separately below.
         db.init_db()
         db.create_player("tester", "password")
         quests.start_default_quests("tester")
 
     def tearDown(self):
         config.DB_PATH = self._orig_db_path
+        config.TRAVEL_SECONDS = self._orig_travel_seconds
 
     def test_new_player_starts_at_camp(self):
         player = db.get_player("tester")
@@ -213,6 +216,109 @@ class CombatTestCase(unittest.TestCase):
         ok, msg = combat.accept(duel["id"], "villain")
         self.assertFalse(ok)
         self.assertIn("cancelled", msg.lower())
+
+
+class DelayedTravelTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_db_path = config.DB_PATH
+        self._orig_travel_seconds = config.TRAVEL_SECONDS
+        config.DB_PATH = os.path.join(self.tmpdir, "test.db")
+        config.TRAVEL_SECONDS = 15.0
+        db.init_db()
+        db.create_player("wanderer", "password")
+
+    def tearDown(self):
+        config.DB_PATH = self._orig_db_path
+        config.TRAVEL_SECONDS = self._orig_travel_seconds
+
+    def test_travel_is_not_instant(self):
+        now = 1000.0
+        ok, msg = travel.travel("wanderer", "east", now=now)
+        self.assertTrue(ok)
+        self.assertIn("Arriving in 15s", msg)
+        self.assertEqual(db.get_player("wanderer").location, "camp")  # not there yet
+
+    def test_cannot_start_second_trip_mid_travel(self):
+        now = 1000.0
+        travel.travel("wanderer", "east", now=now)
+        ok, msg = travel.travel("wanderer", "east", now=now + 1)
+        self.assertFalse(ok)
+        self.assertIn("already on your way", msg)
+
+    def test_arrival_resolves_once_time_passes(self):
+        now = 1000.0
+        travel.travel("wanderer", "east", now=now)
+        travel.resolve_arrival("wanderer", now=now + 20)
+        self.assertEqual(db.get_player("wanderer").location, "riverside")
+
+    def test_training_blocked_while_travelling(self):
+        now = 1000.0
+        travel.travel("wanderer", "east", now=now)
+        ok, msg = training.train("wanderer", "FISHING", "shrimp", now=now + 1)
+        self.assertFalse(ok)
+        self.assertIn("on the road", msg)
+
+    def test_pve_blocked_while_travelling(self):
+        now = 1000.0
+        travel.travel("wanderer", "east", now=now)
+        ok, msg = combat.pve_fight("wanderer", "boar", now=now + 1)
+        self.assertFalse(ok)
+        self.assertIn("on the road", msg)
+
+
+class ResourceNodeTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_db_path = config.DB_PATH
+        config.DB_PATH = os.path.join(self.tmpdir, "test.db")
+        db.init_db()
+        db.create_player("miner", "password")
+        with db.connect() as conn:
+            conn.execute("UPDATE players SET location = 'quarry' WHERE username = 'miner'")
+        db.add_xp("miner", "MINING", 500000)  # plenty of levels for iron/gold
+
+    def tearDown(self):
+        config.DB_PATH = self._orig_db_path
+
+    def test_gold_node_depletes_after_use(self):
+        now = 2000.0
+        ok, msg = training.train("miner", "MINING", "gold", now=now)
+        self.assertTrue(ok)
+        self.assertIn("tapped out", msg)
+        ok2, msg2 = training.train("miner", "MINING", "gold", now=now + 3)
+        self.assertFalse(ok2)
+        self.assertIn("depleted", msg2)
+
+    def test_gold_node_respawns_after_cooldown(self):
+        now = 2000.0
+        training.train("miner", "MINING", "gold", now=now)
+        ok, msg = training.train("miner", "MINING", "gold", now=now + 181)
+        self.assertTrue(ok)
+
+    def test_two_iron_veins_allow_two_miners_before_depletion(self):
+        now = 3000.0
+        ok1, _ = training.train("miner", "MINING", "iron", now=now)
+        self.assertTrue(ok1)
+        ok2, _ = training.train("miner", "MINING", "iron", now=now + 3)  # second vein still up
+        self.assertTrue(ok2)
+        ok3, msg3 = training.train("miner", "MINING", "iron", now=now + 6)
+        self.assertFalse(ok3)
+        self.assertIn("depleted", msg3)
+
+
+class ChatBufferTestCase(unittest.TestCase):
+    def test_messages_visible_until_ttl(self):
+        from game import chat
+        chat.post("town", "alice", "hello", now=100.0)
+        msgs = chat.recent("town", now=100.0 + config.CHAT_MESSAGE_TTL_SECONDS - 1)
+        self.assertEqual(len(msgs), 1)
+
+    def test_messages_expire_after_ttl(self):
+        from game import chat
+        chat.post("town", "alice", "hello", now=100.0)
+        msgs = chat.recent("town", now=100.0 + config.CHAT_MESSAGE_TTL_SECONDS + 1)
+        self.assertEqual(len(msgs), 0)
 
 
 if __name__ == "__main__":

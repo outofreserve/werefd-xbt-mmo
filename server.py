@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from game import combat, companions, config, db, economy, quests, training, travel, ui, world
+from game import chat, combat, companions, config, db, economy, quests, training, travel, ui, world
 import game.skills  # noqa: F401  (import registers FISHING/MINING/COOKING)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -19,6 +19,8 @@ log = logging.getLogger("werefd")
 # Serializes all economy/db mutations so a single-process server never races
 # itself across concurrent client coroutines.
 GAME_LOCK = asyncio.Lock()
+ONLINE_USERS: set[str] = set()
+SESSIONS: dict[str, "Session"] = {}
 
 WELCOME = """\
 ==================================================
@@ -52,8 +54,9 @@ HELP_TEXT = """\
   QUEST                     Free, guaranteed small pool payout (cooldown)
 
 -- World & skilling --
-  TRAVEL <direction>        Move to a connected location (see MAP)
+  TRAVEL <direction>        Set off toward a connected location (takes time -- see MAP)
   TRAIN <skill> <action>    Train a skill action, e.g. TRAIN FISHING SHRIMP
+  SAY <message>             Chat to players in your current location (fades after 60s)
   BUY COMPANION <species>   Buy a companion with XBT (shop species only)
 
 -- Combat --
@@ -76,8 +79,12 @@ class Session:
         self.reader = reader
         self.writer = writer
         self.username: str | None = None
+        self.last_event: str = ""
+        self.location: str | None = None
 
     async def send(self, text: str):
+        if not text.startswith("\x1b[2J"):  # don't let full-screen redraws clobber last_event
+            self.last_event = text.replace("\n", " ").strip()[:120]
         self.writer.write((text + "\n").encode())
         await self.writer.drain()
 
@@ -103,6 +110,9 @@ class Session:
                     break
         finally:
             log.info("connection closed %s (user=%s)", peer, self.username)
+            if self.username:
+                ONLINE_USERS.discard(self.username)
+                SESSIONS.pop(self.username, None)
             self.writer.close()
 
     async def dispatch(self, cmd: str) -> bool:
@@ -126,10 +136,16 @@ class Session:
             await self.send("ERR please LOGIN or REGISTER first.")
             return True
 
+        # Lazily finalize any completed trip before this command runs, and
+        # keep our cached location in sync (used for same-room presence/chat).
+        self.location = await asyncio.to_thread(travel.resolve_arrival, self.username)
+
         if verb == "STATUS":
             await self.cmd_status()
         elif verb == "DASHBOARD":
-            await self.send(await asyncio.to_thread(ui.dashboard, self.username))
+            await self.send(await asyncio.to_thread(
+                ui.dashboard, self.username, self.last_event, len(ONLINE_USERS), self.players_here()
+            ))
         elif verb == "SKILLS":
             await self.send(await asyncio.to_thread(ui.skills_screen, self.username))
         elif verb == "INVENTORY":
@@ -139,11 +155,13 @@ class Session:
         elif verb == "COMPANIONS":
             await self.send(await asyncio.to_thread(ui.companions_screen, self.username))
         elif verb == "MAP":
-            await self.send(await asyncio.to_thread(ui.map_screen, self.username))
+            await self.send(await asyncio.to_thread(ui.map_screen, self.username, self.players_here()))
         elif verb in ("TRAVEL", "GO") and len(parts) == 2:
             await self.cmd_travel(parts[1])
         elif verb == "TRAIN" and len(parts) == 3:
             await self.cmd_train(parts[1], parts[2])
+        elif verb == "SAY" and len(parts) >= 2:
+            await self.cmd_say(cmd.split(" ", 1)[1])
         elif verb == "BUY" and len(parts) >= 3 and parts[1].upper() == "HASH":
             await self.cmd_buy_hash(parts)
         elif verb == "BUY" and len(parts) == 3 and parts[1].upper() == "COMPANION":
@@ -165,6 +183,24 @@ class Session:
 
         await self.check_quests()
         return True
+
+    def players_here(self) -> list[str]:
+        return [name for name, sess in SESSIONS.items() if sess.location == self.location]
+
+    async def cmd_say(self, message: str):
+        message = message.strip()
+        if not message:
+            await self.send("ERR usage: SAY <message>")
+            return
+        player = await asyncio.to_thread(db.get_player, self.username)
+        travelling, remaining = travel.is_travelling(player)
+        if travelling:
+            await self.send(f"ERR you're on the road, no one to talk to. Arriving in {remaining:.0f}s.")
+            return
+        await asyncio.to_thread(chat.post, self.location, self.username, message)
+        for sess in SESSIONS.values():
+            if sess.location == self.location:
+                await sess.send(f"OK [{self.username}] {message}")
 
     async def check_quests(self):
         messages = await asyncio.to_thread(quests.check_and_complete, self.username)
@@ -201,6 +237,9 @@ class Session:
             await self.send("ERR invalid username or password.")
             return
         self.username = username
+        self.location = (await asyncio.to_thread(db.get_player, username)).location
+        ONLINE_USERS.add(username)
+        SESSIONS[username] = self
         await self.send(f"OK welcome back, {username}. Type DASHBOARD or HELP for commands.")
 
     async def cmd_status(self):
@@ -214,6 +253,7 @@ class Session:
     async def cmd_travel(self, direction: str):
         async with GAME_LOCK:
             ok, msg = await asyncio.to_thread(travel.travel, self.username, direction)
+        self.location = (await asyncio.to_thread(db.get_player, self.username)).location
         await self.send(("OK\n" if ok else "ERR ") + msg)
 
     async def cmd_train(self, skill_id: str, action_id: str):

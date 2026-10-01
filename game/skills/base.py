@@ -56,6 +56,7 @@ class SkillAction:
     base_success: float = 1.0          # success chance at level_req, scales toward 1.0 with level
     quantity: int = 1                  # how many of `produces` are granted per success
     fail_produces: str | None = None   # item id granted instead, on failure (e.g. burnt food)
+    node_type: str | None = None       # if set, requires an available shared resource_node of this type
 
 
 @dataclass

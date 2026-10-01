@@ -10,7 +10,7 @@ import json
 import random
 import time
 
-from game import companions, config, db, items, monsters, world
+from game import companions, config, db, items, monsters, travel, world
 
 PVE_COOLDOWN = 15.0
 MAX_ROUNDS = 50
@@ -60,13 +60,18 @@ def battle(a: dict, b: dict, rng: random.Random | None = None) -> dict:
     return {"winner": winner, "rounds": rounds, "log": log}
 
 
-def pve_fight(username: str, monster_id: str) -> tuple[bool, str]:
+def pve_fight(username: str, monster_id: str, now: float | None = None) -> tuple[bool, str]:
+    now = now if now is not None else time.time()
     monster_id = monster_id.lower()
     monster = monsters.get(monster_id)
     if monster is None:
         return False, f"Unknown monster '{monster_id}'."
 
+    travel.resolve_arrival(username, now)
     player = db.get_player(username)
+    travelling, remaining = travel.is_travelling(player, now)
+    if travelling:
+        return False, f"You're on the road, arriving in {remaining:.0f}s."
     loc = world.get(player.location)
     if loc is None or monster_id not in loc.monsters:
         return False, f"There's no {monster.name} here."
@@ -104,11 +109,17 @@ def pve_fight(username: str, monster_id: str) -> tuple[bool, str]:
 VALID_STAKE_TYPES = ("fiat", "xbt", "item", "companion")
 
 
-def challenge(challenger: str, target: str) -> tuple[bool, str]:
+def challenge(challenger: str, target: str, now: float | None = None) -> tuple[bool, str]:
+    now = now if now is not None else time.time()
     if challenger == target:
         return False, "You can't duel yourself."
     if db.get_player(target) is None:
         return False, f"No such player '{target}'."
+    travel.resolve_arrival(challenger, now)
+    player = db.get_player(challenger)
+    travelling, remaining = travel.is_travelling(player, now)
+    if travelling:
+        return False, f"You're on the road, arriving in {remaining:.0f}s."
     if db.get_pending_duel_for(challenger) is not None:
         return False, "You already have a pending duel. DUEL CANCEL it first."
     if db.get_pending_duel_for(target) is not None:

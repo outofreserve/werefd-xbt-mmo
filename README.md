@@ -34,8 +34,9 @@ python3 client.py 127.0.0.1 6565
 | `DASHBOARD` / `SKILLS` / `INVENTORY` / `QUESTS` / `COMPANIONS` / `MAP` | ANSI overview screens |
 | `STATUS` | Fiat balance, XBT balance, hash power, XBT price, location |
 | `BUY HASH <n>` | Buy `n` GH/s of XBT-Hash hardware |
-| `TRAVEL <direction>` | Move to a connected location (see `MAP`) |
+| `TRAVEL <direction>` | Set off toward a connected location -- takes time, see `MAP` |
 | `TRAIN <skill> <action>` | Train a skill, e.g. `TRAIN FISHING SHRIMP` |
+| `SAY <message>` | Chat to players in your current location (fades after ~60s, never saved) |
 | `BUY COMPANION <species>` | Buy a companion with XBT (shop species only) |
 | `SET COMPANION <id>` | Make an owned companion your active combatant |
 | `PVE <monster>` | Fight a wild monster at your location |
@@ -99,6 +100,18 @@ declarative in `game/world.py` -- adding a new one later is just a new
 `Location` entry plus exits linking it in. Skills and monsters are tied to
 specific locations (e.g. Fishing at Riverside, Mining at the Old Quarry).
 
+Travel is **not instant**: setting off (`TRAVEL <direction>`) starts a
+timer (`TRAVEL_SECONDS` in config, 15s by default) and you arrive once it
+elapses -- other actions (training, fighting, dueling) are blocked while
+you're on the road. Some ores (iron, gold) come from **shared, depletable
+resource nodes** (`game/resource_nodes.py`): the first player to mine one
+locks it out for everyone until it respawns on its own timer, so players
+genuinely race for scarce nodes while common ores (copper, tin) stay
+unlimited. You can see who else is sharing your current location (in
+`DASHBOARD`/`MAP`) and `SAY <message>` to chat with them -- chat is
+**never persisted to the database**, living only in server memory, and
+each message fades away after `CHAT_MESSAGE_TTL_SECONDS` (~60s).
+
 ### Skills (RuneScape-style)
 Each skill has a classic XP curve (levels 1-99, `game/skills/base.py`)
 driving a `TRAIN <skill> <action>` loop: gathering skills (Fishing,
@@ -152,7 +165,10 @@ game/world.py          Locations & travel graph
 game/items.py          Item catalog
 game/skills/           Skill framework + one module per skill (fishing/mining/cooking)
 game/training.py       TRAIN command resolution
-game/travel.py          TRAVEL command resolution
+game/travel.py          TRAVEL command resolution (delayed, ETA-based)
+game/resource_nodes.py  Shared depletable resource node catalog (iron/gold veins)
+game/chat.py             Ephemeral, in-memory location-scoped chat (never persisted)
+game/mapview.py          ASCII overworld map renderer
 game/companions.py     Companion species catalog
 game/monsters.py       Wild monster catalog
 game/combat.py          PvE fights + staked PvP duels

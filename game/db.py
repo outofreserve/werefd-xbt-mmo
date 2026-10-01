@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS duels (
     resolved_at REAL,
     winner TEXT
 );
+
+CREATE TABLE IF NOT EXISTS resource_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id TEXT NOT NULL,
+    type_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    available_at REAL NOT NULL DEFAULT 0
+);
 """
 
 # Columns added after the initial release. Each entry is applied with
@@ -97,6 +105,8 @@ CREATE TABLE IF NOT EXISTS duels (
 _MIGRATIONS = [
     ("players", "location", "TEXT NOT NULL DEFAULT 'camp'"),
     ("players", "active_companion_id", "INTEGER"),
+    ("players", "travel_destination", "TEXT"),
+    ("players", "travel_arrival", "REAL"),
 ]
 
 
@@ -131,6 +141,13 @@ def init_db():
                    VALUES (1, 0, 0, 0, ?, ?, ?, ?)""",
                 (config.AMM_SEED_FIAT, config.AMM_SEED_XBT, now, now),
             )
+            from game import resource_nodes
+            for location_id, type_id, label in resource_nodes.SEED_NODES:
+                conn.execute(
+                    """INSERT INTO resource_nodes (location_id, type_id, label, available_at)
+                       VALUES (?, ?, ?, 0)""",
+                    (location_id, type_id, label),
+                )
 
 
 def hash_password(password: str, salt: str) -> str:
@@ -146,6 +163,8 @@ class Player:
     created_at: float
     location: str = "camp"
     active_companion_id: int | None = None
+    travel_destination: str | None = None
+    travel_arrival: float | None = None
 
 
 def create_player(username: str, password: str) -> Player:
@@ -183,7 +202,8 @@ def authenticate(username: str, password: str) -> bool:
 def get_player(username: str) -> Player | None:
     with connect() as conn:
         row = conn.execute(
-            """SELECT username, fiat, xbt, hash_power_ghs, created_at, location, active_companion_id
+            """SELECT username, fiat, xbt, hash_power_ghs, created_at, location, active_companion_id,
+                      travel_destination, travel_arrival
                FROM players WHERE username = ?""",
             (username,),
         ).fetchone()
@@ -192,7 +212,54 @@ def get_player(username: str) -> Player | None:
         return Player(
             row["username"], row["fiat"], row["xbt"], row["hash_power_ghs"], row["created_at"],
             row["location"], row["active_companion_id"],
+            row["travel_destination"], row["travel_arrival"],
         )
+
+
+def start_travel(username: str, destination: str, arrival: float):
+    with connect() as conn:
+        conn.execute(
+            "UPDATE players SET travel_destination = ?, travel_arrival = ? WHERE username = ?",
+            (destination, arrival, username),
+        )
+
+
+def finish_travel(username: str, destination: str):
+    with connect() as conn:
+        conn.execute(
+            """UPDATE players SET location = ?, travel_destination = NULL, travel_arrival = NULL
+               WHERE username = ?""",
+            (destination, username),
+        )
+
+
+def get_nodes(location_id: str):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM resource_nodes WHERE location_id = ? ORDER BY id", (location_id,)
+        ).fetchall()
+
+
+def deplete_node(node_id: int, available_at: float, conn=None):
+    def _run(c):
+        c.execute("UPDATE resource_nodes SET available_at = ? WHERE id = ?", (available_at, node_id))
+
+    if conn is not None:
+        _run(conn)
+    else:
+        with connect() as c2:
+            _run(c2)
+
+
+def get_game_state() -> dict:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM game_state WHERE id = 1").fetchone()
+        return dict(row) if row else {}
+
+
+def count_players() -> int:
+    with connect() as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM players").fetchone()["n"]
 
 
 def set_location(username: str, location_id: str):

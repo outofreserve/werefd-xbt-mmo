@@ -52,3 +52,9 @@ ACTIONS = {
 }
 
 DB_PATH = "werefd.db"
+
+# --- World travel ---
+TRAVEL_SECONDS = 15.0   # time a TRAVEL hop takes; not instant.
+
+# --- Ephemeral local chat ---
+CHAT_MESSAGE_TTL_SECONDS = 60.0  # chat is never persisted; it just expires.
