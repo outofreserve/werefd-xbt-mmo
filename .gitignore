@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+werefd.db
+werefd.db-shm
+werefd.db-wal
