@@ -15,6 +15,7 @@ MIN_PASSWORD_LEN = 4            # Passwords cannot be recovered -- players must 
 # --- Fiat interest (feeds the action pool) ---
 FIAT_APY = 0.10                 # 10% annual rate, compounded every tick.
 TICK_SECONDS = 1.0              # Interest + electricity billing cadence.
+DASHBOARD_REFRESH_SECONDS = 10.0  # Auto-repaint cadence while DASHBOARD is open.
 SECONDS_PER_YEAR = 365 * 24 * 3600
 # Per-tick compounding rate derived from the APY.
 FIAT_TICK_RATE = (1.0 + FIAT_APY) ** (TICK_SECONDS / SECONDS_PER_YEAR) - 1.0

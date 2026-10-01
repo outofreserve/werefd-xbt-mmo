@@ -81,6 +81,7 @@ class Session:
         self.username: str | None = None
         self.last_event: str = ""
         self.location: str | None = None
+        self.auto_dashboard: bool = False
 
     async def send(self, text: str):
         if not text.startswith("\x1b[2J"):  # don't let full-screen redraws clobber last_event
@@ -135,6 +136,10 @@ class Session:
         if self.username is None:
             await self.send("ERR please LOGIN or REGISTER first.")
             return True
+
+        # DASHBOARD auto-refreshes every 10s (see dashboard_refresh_loop) until
+        # any other command is run, so it doesn't clobber other screens.
+        self.auto_dashboard = verb == "DASHBOARD"
 
         # Lazily finalize any completed trip before this command runs, and
         # keep our cached location in sync (used for same-room presence/chat).
@@ -399,6 +404,25 @@ async def tick_loop():
             log.info("block reward paid out")
 
 
+async def dashboard_refresh_loop():
+    """Re-pushes the DASHBOARD screen every DASHBOARD_REFRESH_SECONDS to any
+    session currently viewing it, so balances/timers update without the
+    player needing to retype DASHBOARD. Stops the moment they run any other
+    command (see Session.dispatch)."""
+    while True:
+        await asyncio.sleep(config.DASHBOARD_REFRESH_SECONDS)
+        for sess in list(SESSIONS.values()):
+            if not sess.auto_dashboard or sess.username is None:
+                continue
+            try:
+                text = await asyncio.to_thread(
+                    ui.dashboard, sess.username, sess.last_event, len(ONLINE_USERS), sess.players_here()
+                )
+                await sess.send(text)
+            except Exception:
+                log.exception("error auto-refreshing dashboard for %s", sess.username)
+
+
 async def handle_client(reader, writer):
     await Session(reader, writer).handle()
 
@@ -406,6 +430,7 @@ async def handle_client(reader, writer):
 async def main():
     await asyncio.to_thread(db.init_db)
     asyncio.create_task(tick_loop())
+    asyncio.create_task(dashboard_refresh_loop())
     server = await asyncio.start_server(handle_client, config.HOST, config.PORT)
     addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     log.info("serving on %s", addrs)
