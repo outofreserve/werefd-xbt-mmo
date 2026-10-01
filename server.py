@@ -1,16 +1,17 @@
 """We're F'd: An XBT MMO -- TCP server.
 
 A line-based, telnet-friendly protocol: connect with `nc host port` or any
-raw TCP client, type commands, read responses. No client required, though
-client.py provides a nicer prompt-based wrapper.
+raw TCP client, type commands, read responses. ANSI screens (DASHBOARD,
+SKILLS, INVENTORY, QUESTS, COMPANIONS, MAP) redraw cleanly in any terminal
+emulator without needing curses or a dedicated client.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 
-from game import config, db, economy
+from game import combat, companions, config, db, economy, quests, training, travel, ui, world
+import game.skills  # noqa: F401  (import registers FISHING/MINING/COOKING)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("werefd")
@@ -33,22 +34,40 @@ Type a command and press enter.
 """
 
 HELP_TEXT = """\
-Commands:
-  STATUS                   Your balances, hash power, and cooldowns
-  BUY HASH <n>             Buy n GH/s of XBT-Hash ($%.2f/GH/s, draws %.1fW each)
-  MARKET PRICE             Current XBT price in fiat
-  MARKET BUY <fiat>        Spend fiat to buy XBT
-  MARKET SELL <xbt>        Sell XBT for fiat
-  FIGHT GOBLIN             Cost $%.2f, %.0f%% win chance, reward $%.2f
-  FIGHT DRAGON             Cost $%.2f, %.0f%% win chance, reward $%.2f
-  QUEST                    Free, guaranteed small reward (cooldown %ds)
-  QUIT                     Disconnect
+-- Screens (redrawn ANSI panels) --
+  DASHBOARD                 Overview: location, balances, skills, quests
+  SKILLS                    Detailed skill levels & unlockable actions
+  INVENTORY                 Your items
+  QUESTS                    Quest log
+  COMPANIONS                Your companions
+  MAP                       World map / current location
+
+-- Economy --
+  STATUS                    Your balances, hash power, and cooldowns
+  BUY HASH <n>              Buy n GH/s of XBT-Hash ($%.2f/GH/s, draws %.1fW each)
+  MARKET PRICE              Current XBT price in fiat
+  MARKET BUY <fiat>         Spend fiat to buy XBT
+  MARKET SELL <xbt>         Sell XBT for fiat
+  FIGHT GOBLIN | DRAGON     Risk a fiat stake against the shared pool
+  QUEST                     Free, guaranteed small pool payout (cooldown)
+
+-- World & skilling --
+  TRAVEL <direction>        Move to a connected location (see MAP)
+  TRAIN <skill> <action>    Train a skill action, e.g. TRAIN FISHING SHRIMP
+  BUY COMPANION <species>   Buy a companion with XBT (shop species only)
+
+-- Combat --
+  PVE <monster>             Fight a wild monster at your location
+  DUEL CHALLENGE <user>     Challenge another player to a staked duel
+  DUEL STAKE FIAT <amount> | XBT <amount> | ITEM <id> <qty> | COMPANION <id>
+  DUEL ACCEPT               Accept your pending duel (resolves it instantly)
+  DUEL CANCEL               Cancel your pending duel
+  DUEL STATUS               Show your pending duel
+
+  QUIT                      Disconnect
 """ % (
     config.HASH_PRICE_FIAT,
     config.WATTS_PER_GHS,
-    config.ACTIONS["GOBLIN"]["cost"], config.ACTIONS["GOBLIN"]["win_chance"] * 100, config.ACTIONS["GOBLIN"]["reward"],
-    config.ACTIONS["DRAGON"]["cost"], config.ACTIONS["DRAGON"]["win_chance"] * 100, config.ACTIONS["DRAGON"]["reward"],
-    config.ACTIONS["QUEST"]["cooldown"],
 )
 
 
@@ -109,17 +128,48 @@ class Session:
 
         if verb == "STATUS":
             await self.cmd_status()
+        elif verb == "DASHBOARD":
+            await self.send(await asyncio.to_thread(ui.dashboard, self.username))
+        elif verb == "SKILLS":
+            await self.send(await asyncio.to_thread(ui.skills_screen, self.username))
+        elif verb == "INVENTORY":
+            await self.send(await asyncio.to_thread(ui.inventory_screen, self.username))
+        elif verb == "QUESTS":
+            await self.send(await asyncio.to_thread(ui.quests_screen, self.username))
+        elif verb == "COMPANIONS":
+            await self.send(await asyncio.to_thread(ui.companions_screen, self.username))
+        elif verb == "MAP":
+            await self.send(await asyncio.to_thread(ui.map_screen, self.username))
+        elif verb in ("TRAVEL", "GO") and len(parts) == 2:
+            await self.cmd_travel(parts[1])
+        elif verb == "TRAIN" and len(parts) == 3:
+            await self.cmd_train(parts[1], parts[2])
         elif verb == "BUY" and len(parts) >= 3 and parts[1].upper() == "HASH":
             await self.cmd_buy_hash(parts)
+        elif verb == "BUY" and len(parts) == 3 and parts[1].upper() == "COMPANION":
+            await self.cmd_buy_companion(parts[2])
+        elif verb == "SET" and len(parts) == 3 and parts[1].upper() == "COMPANION":
+            await self.cmd_set_companion(parts[2])
         elif verb == "MARKET":
             await self.cmd_market(parts)
+        elif verb == "PVE" and len(parts) == 2:
+            await self.cmd_pve(parts[1])
+        elif verb == "DUEL":
+            await self.cmd_duel(parts)
         elif verb == "FIGHT" and len(parts) >= 2:
             await self.cmd_action(parts[1])
         elif verb == "QUEST":
             await self.cmd_action("QUEST")
         else:
             await self.send("ERR unknown command. Type HELP.")
+
+        await self.check_quests()
         return True
+
+    async def check_quests(self):
+        messages = await asyncio.to_thread(quests.check_and_complete, self.username)
+        for msg in messages:
+            await self.send("OK " + msg)
 
     async def cmd_register(self, parts: list[str]):
         if len(parts) != 3:
@@ -135,6 +185,7 @@ class Session:
             except ValueError as exc:
                 await self.send(f"ERR {exc}")
                 return
+            await asyncio.to_thread(quests.start_default_quests, username)
         await self.send(
             f"OK account '{username}' created with ${config.STARTING_FIAT:,.2f}. "
             "WRITE YOUR PASSWORD DOWN -- it cannot ever be recovered. Now LOGIN."
@@ -150,15 +201,25 @@ class Session:
             await self.send("ERR invalid username or password.")
             return
         self.username = username
-        await self.send(f"OK welcome back, {username}. Type HELP for commands.")
+        await self.send(f"OK welcome back, {username}. Type DASHBOARD or HELP for commands.")
 
     async def cmd_status(self):
         player = await asyncio.to_thread(db.get_player, self.username)
         price = await asyncio.to_thread(economy.amm_price)
         await self.send(
             f"OK user={player.username} fiat=${player.fiat:,.2f} xbt={player.xbt:.8f} "
-            f"hash={player.hash_power_ghs:g}GH/s xbt_price=${price:,.2f}"
+            f"hash={player.hash_power_ghs:g}GH/s xbt_price=${price:,.2f} location={player.location}"
         )
+
+    async def cmd_travel(self, direction: str):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(travel.travel, self.username, direction)
+        await self.send(("OK\n" if ok else "ERR ") + msg)
+
+    async def cmd_train(self, skill_id: str, action_id: str):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(training.train, self.username, skill_id, action_id)
+        await self.send(("OK " if ok else "ERR ") + msg)
 
     async def cmd_buy_hash(self, parts: list[str]):
         try:
@@ -170,6 +231,24 @@ class Session:
         async with GAME_LOCK:
             ok, msg = await asyncio.to_thread(economy.buy_hash, self.username, units)
         await self.send(("OK " if ok else "ERR ") + msg)
+
+    async def cmd_buy_companion(self, species_id: str):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(combat.buy_companion, self.username, species_id)
+        await self.send(("OK " if ok else "ERR ") + msg)
+
+    async def cmd_set_companion(self, companion_id_str: str):
+        try:
+            companion_id = int(companion_id_str)
+        except ValueError:
+            await self.send("ERR usage: SET COMPANION <id>")
+            return
+        comp = await asyncio.to_thread(db.get_companion, companion_id)
+        if comp is None or comp["username"] != self.username:
+            await self.send("ERR you don't own that companion.")
+            return
+        await asyncio.to_thread(db.set_active_companion, self.username, companion_id)
+        await self.send(f"OK {comp['nickname']} is now your active companion.")
 
     async def cmd_market(self, parts: list[str]):
         if len(parts) < 2:
@@ -194,6 +273,76 @@ class Session:
             await self.send(("OK " if ok else "ERR ") + msg)
             return
         await self.send("ERR usage: MARKET PRICE | MARKET BUY <fiat> | MARKET SELL <xbt>")
+
+    async def cmd_pve(self, monster_id: str):
+        async with GAME_LOCK:
+            ok, msg = await asyncio.to_thread(combat.pve_fight, self.username, monster_id)
+        await self.send(("OK\n" if ok else "ERR ") + msg)
+
+    async def cmd_duel(self, parts: list[str]):
+        if len(parts) < 2:
+            await self.send("ERR usage: DUEL CHALLENGE|STAKE|ACCEPT|CANCEL|STATUS ...")
+            return
+        sub = parts[1].upper()
+
+        if sub == "CHALLENGE" and len(parts) == 3:
+            async with GAME_LOCK:
+                ok, msg = await asyncio.to_thread(combat.challenge, self.username, parts[2])
+            await self.send(("OK " if ok else "ERR ") + msg)
+            return
+
+        if sub == "STATUS":
+            duel = await asyncio.to_thread(db.get_pending_duel_for, self.username)
+            if duel is None:
+                await self.send("OK no pending duel.")
+            else:
+                await self.send(
+                    f"OK duel #{duel['id']} {duel['challenger']} vs {duel['target']} "
+                    f"status={duel['status']} challenger_stake={duel['challenger_stake']} "
+                    f"target_stake={duel['target_stake']}"
+                )
+            return
+
+        duel = await asyncio.to_thread(db.get_pending_duel_for, self.username)
+        if duel is None:
+            await self.send("ERR no pending duel. Start one with DUEL CHALLENGE <user>.")
+            return
+
+        if sub == "STAKE" and len(parts) >= 4:
+            stake_type = parts[2].lower()
+            stake = None
+            try:
+                if stake_type == "fiat":
+                    stake = {"type": "fiat", "amount": float(parts[3])}
+                elif stake_type == "xbt":
+                    stake = {"type": "xbt", "amount": float(parts[3])}
+                elif stake_type == "item" and len(parts) == 5:
+                    stake = {"type": "item", "item_id": parts[3].lower(), "qty": int(parts[4])}
+                elif stake_type == "companion":
+                    stake = {"type": "companion", "companion_id": int(parts[3])}
+            except ValueError:
+                stake = None
+            if stake is None:
+                await self.send("ERR usage: DUEL STAKE FIAT <amount> | XBT <amount> | ITEM <id> <qty> | COMPANION <id>")
+                return
+            async with GAME_LOCK:
+                ok, msg = await asyncio.to_thread(combat.set_stake, self.username, duel["id"], stake)
+            await self.send(("OK " if ok else "ERR ") + msg)
+            return
+
+        if sub == "ACCEPT":
+            async with GAME_LOCK:
+                ok, msg = await asyncio.to_thread(combat.accept, duel["id"], self.username)
+            await self.send(("OK\n" if ok else "ERR ") + msg)
+            return
+
+        if sub == "CANCEL":
+            async with GAME_LOCK:
+                ok, msg = await asyncio.to_thread(combat.cancel, duel["id"], self.username)
+            await self.send(("OK " if ok else "ERR ") + msg)
+            return
+
+        await self.send("ERR usage: DUEL CHALLENGE|STAKE|ACCEPT|CANCEL|STATUS ...")
 
     async def cmd_action(self, action_name: str):
         async with GAME_LOCK:
